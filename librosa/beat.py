@@ -47,7 +47,7 @@ def beat_track(
     prior: scipy.stats.rv_continuous | None = None,
     units: Literal["frames", "samples"] = "frames",
     sparse: Literal[True] = True,
-) -> tuple[_SparseBpmT, npt.NDArray[np.int_]]: ...
+) -> tuple[_SparseBpmT, npt.NDArray[np.int_] | npt.NDArray[np.object_]]: ...
 @overload  # units="time", sparse=True (default)
 def beat_track(
     *,
@@ -62,7 +62,7 @@ def beat_track(
     prior: scipy.stats.rv_continuous | None = None,
     units: Literal["time"],
     sparse: Literal[True] = True,
-) -> tuple[_SparseBpmT, npt.NDArray[np.float64]]: ...
+) -> tuple[_SparseBpmT, npt.NDArray[np.float64] | npt.NDArray[np.object_]]: ...
 @overload  # sparse=False
 def beat_track(
     *,
@@ -153,7 +153,9 @@ def beat_track(
         If ``False``, detections are encoded as a dense boolean array where
         ``beats[..., n]`` is true if there's a beat at frame index ``n``.
 
-        .. note:: multi-channel input is only supported when ``sparse=False``.
+        For multi-channel input with ``sparse=True``, an object array of beat
+        location arrays is returned, one per channel, with the same leading
+        shape as the input.
 
     Returns
     -------
@@ -173,8 +175,13 @@ def beat_track(
         If `sparse=True` (default), beat locations are given in the specified units
         (default is frame indices).
 
-        If `sparse=False` (required for multichannel input), beat events are
-        indicated by a boolean for each frame.
+        For multi-channel input with `sparse=True`, ``beats`` is an object
+        array with the same leading shape as the input, where each element
+        is a one-dimensional array of beat locations for the corresponding
+        channel. Channels with no detected beats contain an empty array.
+
+        If `sparse=False`, beat events are indicated by a boolean for each
+        frame.
 
         .. note::
             If no onset strength could be detected, beat_tracker estimates 0 BPM
@@ -263,15 +270,24 @@ def beat_track(
             y=y, sr=sr, hop_length=hop_length, aggregate=np.median
         )
 
-    if sparse and onset_envelope.ndim != 1:
-        raise ParameterError(f"sparse=True (default) does not support "
-                f"{onset_envelope.ndim}-dimensional inputs. "
-                f"Either set sparse=False or convert the signal to mono.")
+    if units not in ("frames", "samples", "time"):
+        raise ParameterError(f"Invalid unit type: {units}")
 
     # Do we have any onsets to grab?
     if not onset_envelope.any():
         if sparse:
-            return (0.0, np.array([], dtype=int))
+            if onset_envelope.ndim == 1:
+                return (0.0, np.array([], dtype=int))
+            else:
+                return (
+                    np.zeros(shape=onset_envelope.shape[:-1], dtype=float),
+                    __sparse_beats(
+                        np.zeros_like(onset_envelope, dtype=bool),
+                        units=units,
+                        sr=sr,
+                        hop_length=hop_length,
+                    ),
+                )
         else:
             return (np.zeros(shape=onset_envelope.shape[:-1], dtype=float),
                     np.zeros_like(onset_envelope, dtype=bool))
@@ -296,17 +312,59 @@ def beat_track(
     beats = __beat_tracker(onset_envelope, bpm_expanded, float(sr) / hop_length, tightness, trim)
 
     if sparse:
-        beats = np.flatnonzero(beats)
-
-        if units == "frames":
-            pass
-        elif units == "samples":
-            return (bpm, core.frames_to_samples(beats, hop_length=hop_length))
-        elif units == "time":
-            return (bpm, core.frames_to_time(beats, hop_length=hop_length, sr=sr))
-        else:
-            raise ParameterError(f"Invalid unit type: {units}")
+        beats = __sparse_beats(beats, units=units, sr=sr, hop_length=hop_length)
     return (bpm, beats)
+
+
+def __sparse_beats(
+    beats: np.ndarray, *, units: str, sr: float, hop_length: int
+) -> np.ndarray:
+    """Convert dense beat indicator arrays into sparse beat location arrays.
+
+    Parameters
+    ----------
+    beats : np.ndarray [shape=(..., n,), dtype=bool]
+        Dense boolean array of beat detections along the final axis.
+    units : {'frames', 'samples', 'time'}
+        The units to encode detected beat events in.
+    sr : float
+        Sampling rate, used when ``units='time'``.
+    hop_length : int
+        Hop length, used when converting frame indices.
+
+    Returns
+    -------
+    sparse_beats : np.ndarray
+        For one-dimensional input, a one-dimensional array of beat locations
+        matching the mono ``beat_track`` return type.
+        For multi-channel input, an object array of the same leading shape
+        as ``beats``, where each element is a one-dimensional array of beat
+        locations for the corresponding channel.
+    """
+    if units not in ("frames", "samples", "time"):
+        raise ParameterError(f"Invalid unit type: {units}")
+
+    if beats.ndim == 1:
+        sparse_beats = np.flatnonzero(beats)
+        if units == "samples":
+            return core.frames_to_samples(sparse_beats, hop_length=hop_length)
+        elif units == "time":
+            return core.frames_to_time(sparse_beats, sr=sr, hop_length=hop_length)
+        return sparse_beats
+
+    sparse_beats = np.empty(shape=beats.shape[:-1], dtype=object)
+    for index in np.ndindex(beats.shape[:-1]):
+        channel_beats = np.flatnonzero(beats[index])
+        if units == "samples":
+            channel_beats = core.frames_to_samples(
+                channel_beats, hop_length=hop_length
+            )
+        elif units == "time":
+            channel_beats = core.frames_to_time(
+                channel_beats, sr=sr, hop_length=hop_length
+            )
+        sparse_beats[index] = channel_beats
+    return sparse_beats
 
 
 def plp[FloatT: np.floating[Any]](

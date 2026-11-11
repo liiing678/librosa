@@ -1269,7 +1269,141 @@ def test_beat_track_multi_bpm_vector(y_multi):
     assert np.allclose(beats[1], beats1)
 
 
-@pytest.mark.xfail(raises=librosa.ParameterError)
-def test_beat_track_multi_sparse(y_multi):
-    y, sr = y_multi
-    librosa.beat.beat_track(y=y, sr=sr, sparse=True)
+@pytest.fixture(scope="module")
+def y_drum_stereo():
+    # Synthesize a stereo drum-like track where the two channels carry
+    # pulse trains at the same tempo but offset by half a beat, so that
+    # down-mixing to mono would blur the channel-specific beat positions.
+    sr = 22050
+    bpm = 120
+    period = librosa.time_to_samples(60.0 / bpm, sr=sr).item()
+    duration = 10 * sr
+    y = np.zeros((2, duration))
+    y[0, ::period] = 1
+    y[1, period // 2::period] = 1
+    return y, sr, period
+
+
+@pytest.mark.parametrize("units", ["frames", "samples", "time"])
+def test_beat_track_multi_sparse(y_drum_stereo, units):
+    y, sr, _ = y_drum_stereo
+    hop_length = 512
+
+    tempo, beats = librosa.beat.beat_track(
+        y=y, sr=sr, hop_length=hop_length, units=units, sparse=True
+    )
+
+    # Multi-channel sparse output is an object array with one beat
+    # location array per channel.
+    assert isinstance(beats, np.ndarray)
+    assert beats.dtype == object
+    assert beats.shape == y.shape[:-1]
+
+    tempo0, beats0 = librosa.beat.beat_track(
+        y=y[0], sr=sr, hop_length=hop_length, units=units, sparse=True
+    )
+    tempo1, beats1 = librosa.beat.beat_track(
+        y=y[1], sr=sr, hop_length=hop_length, units=units, sparse=True
+    )
+
+    assert np.allclose(tempo[0], tempo0)
+    assert np.allclose(tempo[1], tempo1)
+
+    # Each channel matches independent mono processing ...
+    assert np.array_equal(beats[0], beats0)
+    assert np.array_equal(beats[1], beats1)
+
+    # ... and the offset beat positions between channels are preserved.
+    assert not np.array_equal(beats[0], beats[1])
+    assert len(beats[0]) > 0 and len(beats[1]) > 0
+
+    # Sparse locations must agree with the dense boolean detections and
+    # with the frame-unit sparse output.
+    _, beats_dense = librosa.beat.beat_track(
+        y=y, sr=sr, hop_length=hop_length, sparse=False
+    )
+    _, beat_frames = librosa.beat.beat_track(
+        y=y, sr=sr, hop_length=hop_length, units="frames", sparse=True
+    )
+
+    for channel in range(2):
+        assert np.all(beats_dense[channel][beat_frames[channel]])
+        if units == "frames":
+            assert np.array_equal(beats[channel], beat_frames[channel])
+        elif units == "samples":
+            expected = librosa.frames_to_samples(
+                beat_frames[channel], hop_length=hop_length
+            )
+            assert np.array_equal(beats[channel], expected)
+        else:
+            expected = librosa.frames_to_time(
+                beat_frames[channel], sr=sr, hop_length=hop_length
+            )
+            assert np.allclose(beats[channel], expected)
+
+
+def test_beat_track_multi_sparse_bpm_scalar(y_drum_stereo):
+    y, sr, _ = y_drum_stereo
+
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, bpm=100, sparse=True)
+    _, beats0 = librosa.beat.beat_track(y=y[0], sr=sr, bpm=100, sparse=True)
+    _, beats1 = librosa.beat.beat_track(y=y[1], sr=sr, bpm=100, sparse=True)
+
+    assert np.isscalar(tempo)
+    assert beats.shape == (2,)
+    assert np.array_equal(beats[0], beats0)
+    assert np.array_equal(beats[1], beats1)
+
+
+def test_beat_track_multi_sparse_bpm_vector(y_drum_stereo):
+    y, sr, _ = y_drum_stereo
+
+    bpm = np.array([150.0, 75.0])
+    tempo, beats = librosa.beat.beat_track(y=y, sr=sr, bpm=bpm, sparse=True)
+    _, beats0 = librosa.beat.beat_track(y=y[0], sr=sr, bpm=bpm[0], sparse=True)
+    _, beats1 = librosa.beat.beat_track(y=y[1], sr=sr, bpm=bpm[1], sparse=True)
+
+    assert isinstance(tempo, np.ndarray)
+    assert np.allclose(tempo, bpm)
+    assert beats.shape == (2,)
+    assert np.array_equal(beats[0], beats0)
+    assert np.array_equal(beats[1], beats1)
+
+
+def test_beat_track_multi_sparse_no_onsets():
+    sr = 22050
+    hop_length = 512
+    onset_envelope = np.zeros((2, 100))
+
+    tempo, beats = librosa.beat.beat_track(
+        onset_envelope=onset_envelope,
+        sr=sr,
+        hop_length=hop_length,
+        sparse=True,
+    )
+
+    assert tempo.shape == (2,)
+    assert np.allclose(tempo, 0)
+    assert beats.dtype == object
+    assert beats.shape == (2,)
+    for channel in range(2):
+        assert isinstance(beats[channel], np.ndarray)
+        assert beats[channel].shape == (0,)
+
+
+def test_beat_track_multi_sparse_no_onsets_time_units():
+    sr = 22050
+    hop_length = 512
+    onset_envelope = np.zeros((2, 100))
+
+    tempo, beats = librosa.beat.beat_track(
+        onset_envelope=onset_envelope,
+        sr=sr,
+        hop_length=hop_length,
+        units="time",
+        sparse=True,
+    )
+
+    assert np.allclose(tempo, 0)
+    for channel in range(2):
+        assert beats[channel].shape == (0,)

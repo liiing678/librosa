@@ -138,14 +138,20 @@ expectations.
 This section briefly summarizes places where multi-channel support is limited.
 
 
-**Detectors** with sparse output (i.e., frame indices), for example beat tracking (`librosa.beat`) and
-onset detection (`librosa.onset.onset_detect`) do not support multi-channel inputs.
+**Detectors** with sparse output (i.e., frame indices), for example onset detection
+(`librosa.onset.onset_detect`), do not support multi-channel inputs.
 This is because the output may have differing numbers of events in each channel, and
 therefore cannot be consistently stored in a `numpy.ndarray` output object.
 
-Onset and beat detection **can** handle multi-channel input **only** if the `sparse=False` parameter is provided,
+Onset detection **can** handle multi-channel input **only** if the `sparse=False` parameter is provided,
 in which case the output detections will be encoded as (dense) boolean arrays rather than sparse frame indices
 or timestamps.
+
+Beat tracking (`librosa.beat.beat_track`) supports both modes for multi-channel input.
+With `sparse=False`, detections are returned as dense boolean arrays.
+With `sparse=True` (default), an object array is returned with the same leading shape
+as the input, where each element is a one-dimensional array of beat locations for the
+corresponding channel; channels with no detected beats contain an empty array.
 
 
 **Self- and cross-similarity matrices**, as computed by `librosa.segment.recurrence_matrix` have limited multi-channel support.
